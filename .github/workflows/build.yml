@@ -1,0 +1,167 @@
+# Build relocatable libkrun + libkrunfw artefacts on a matrix of hosts and
+# publish them to a GitHub Release tagged `libkrun-v<version>`.
+#
+# These bottles are consumed by the ward release packaging pipeline, which
+# bundles them alongside the `wardd` and `ward` binaries into per-platform
+# end-user artefacts (`.pkg`, `.deb`, `install.sh` tarballs). End users
+# download one self-contained file and never run a second install command.
+# Developers building from source install libkrun via their system package
+# manager, see igorjs/ward CONTRIBUTING.md for that workflow.
+#
+# Gating: manual trigger only. We don't run on push because libkrun bumps
+# rarely (every few months) but pushes to this repo are infrequent anyway;
+# manual control over when a 30-min matrix build runs is the right call.
+
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_override:
+        description: "Override version (otherwise read from version.txt)"
+        required: false
+        type: string
+
+permissions:
+  contents: write # required to create releases + upload artefacts
+
+jobs:
+  # ── Resolve the version once and propagate to the matrix jobs ──────
+  resolve-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: read
+        name: Resolve libkrun version
+        run: |
+          if [[ -n "${{ inputs.version_override }}" ]]; then
+            VERSION="${{ inputs.version_override }}"
+          else
+            VERSION="$(tr -d '[:space:]' < version.txt)"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved libkrun version: ${VERSION}"
+
+  # ── Build per-target ──────────────────────────────────────────────
+  build:
+    needs: [resolve-version]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            install_deps: |
+              # macOS Apple Silicon: Xcode CLT brings install_name_tool.
+              brew install pkg-config
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            install_deps: |
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends \
+                build-essential clang patchelf pkg-config libelf-dev \
+                bc bison flex
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            install_deps: |
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends \
+                build-essential clang patchelf pkg-config libelf-dev \
+                bc bison flex
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        run: ${{ matrix.install_deps }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build libkrun (${{ matrix.target }})
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Record checksum
+        id: checksum
+        run: |
+          cd dist
+          TARBALL="libkrun-${{ needs.resolve-version.outputs.version }}-${{ matrix.target }}.tar.gz"
+          if command -v sha256sum > /dev/null 2>&1; then
+            SHA="$(sha256sum "$TARBALL" | awk '{print $1}')"
+          else
+            SHA="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"
+          fi
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "tarball=${TARBALL}" >> "$GITHUB_OUTPUT"
+          echo "${SHA}  ${TARBALL}" > "${TARBALL}.sha256"
+          echo "Checksum for ${TARBALL}: ${SHA}"
+
+      - name: Upload artefact (per-target build output)
+        uses: actions/upload-artifact@v4
+        with:
+          name: libkrun-${{ matrix.target }}
+          path: |
+            dist/libkrun-*-${{ matrix.target }}.tar.gz
+            dist/libkrun-*-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  # ── Publish all targets in one release ────────────────────────────
+  release:
+    needs: [resolve-version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download all build artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Summarise checksums
+        run: |
+          echo "## Vendor build summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Version: \`${{ needs.resolve-version.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Copy the following lines into \`checksums.txt\` (and into ward's release packaging pipeline that consumes this release):" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat dist/*.sha256 | sort | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: libkrun-v${{ needs.resolve-version.outputs.version }}
+          name: libkrun ${{ needs.resolve-version.outputs.version }}
+          body: |
+            Pre-built libkrun + libkrunfw binaries for ward.
+
+            Layout (inside each tarball):
+            ```
+            lib/libkrun.{dylib,so}      relocatable, @rpath / $ORIGIN install names
+            lib/libkrunfw.{dylib,so}    same
+            lib/pkgconfig/libkrun.pc    synthesised, prefix placeholder rewritten by consumer
+            include/libkrun.h
+            ```
+
+            Consumed by the ward release packaging workflow, which bundles
+            these dylibs alongside the `wardd` / `ward` binaries via rpath.
+
+            **Supply-chain note**: after this release publishes, copy the
+            SHA-256 sums (from the workflow Job Summary) into
+            `checksums.txt` here AND into ward's release packaging
+            consumer before depending on this version.
+          files: |
+            dist/libkrun-*.tar.gz
+            dist/libkrun-*.tar.gz.sha256
+          fail_on_unmatched_files: true
