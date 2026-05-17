@@ -60,21 +60,30 @@ jobs:
               # macOS Apple Silicon: Xcode CLT brings install_name_tool.
               # `lld` is required because libkrun's Makefile passes
               # `-fuse-ld=lld` to clang, and Xcode's clang doesn't ship
-              # an `ld.lld` binary.
+              # an `ld.lld` binary. Installing lld pulls llvm as a
+              # transitive dep, but Homebrew keeps it keg-only so
+              # libclang.dylib isn't on dyld's default search path:
+              # export LIBCLANG_PATH + LLVM_CONFIG_PATH so the
+              # bindgen-using crates in libkrun (e.g. krun-input,
+              # clang-sys) can find them at build time.
               brew install lld pkg-config
+              LLVM_PREFIX="$(brew --prefix llvm)"
+              echo "LIBCLANG_PATH=${LLVM_PREFIX}/lib" >> "$GITHUB_ENV"
+              echo "LLVM_CONFIG_PATH=${LLVM_PREFIX}/bin/llvm-config" >> "$GITHUB_ENV"
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-24.04
             install_deps: |
               sudo apt-get update
               sudo apt-get install -y --no-install-recommends \
-                build-essential clang lld patchelf pkg-config libelf-dev \
-                bc bison flex
+                build-essential clang lld llvm-dev libclang-dev \
+                patchelf pkg-config libelf-dev bc bison flex
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
             install_deps: |
               sudo apt-get update
               sudo apt-get install -y --no-install-recommends \
-                build-essential clang lld patchelf pkg-config libelf-dev \
+                build-essential clang lld llvm-dev libclang-dev \
+                patchelf pkg-config libelf-dev \
                 bc bison flex
     runs-on: ${{ matrix.runner }}
     steps:
