@@ -202,12 +202,19 @@ tar -xzf "${WORK}/libkrun.tar.gz" -C "${WORK}/libkrun" --strip-components=1 \
 
 # libkrunfw + libkrun .dylib/.so files. Both might be installed under
 # lib/ or lib64/ depending on the upstream Makefile; copy whatever
-# exists. Use `find` instead of glob to handle SO versioning suffixes
-# (e.g. libkrun.so.1.18.0) and symlinks.
+# exists. The glob `lib*.dylib*` / `lib*.so*` covers both conventions:
+#   Linux:  libkrunfw.so, libkrunfw.so.5, libkrunfw.so.5.3.0
+#           (version SUFFIX after the extension)
+#   macOS:  libkrun.dylib, libkrun.1.dylib, libkrun.1.18.0.dylib
+#           (version INFIX between name and extension)
+# A naive `libkrun.${DYLIB_EXT}*` glob only matches the Linux pattern
+# and leaves the macOS versioned files behind, producing dangling
+# symlinks. Anchoring with `lib*` keeps `libkrun.pc` and `libkrun.h`
+# out of the result.
 echo "==> Staging dylibs"
 for libdir in "${PREFIX}/lib" "${PREFIX}/lib64"; do
   [[ -d "$libdir" ]] || continue
-  find "$libdir" -maxdepth 1 \( -name "libkrun.${DYLIB_EXT}*" -o -name "libkrunfw.${DYLIB_EXT}*" \) \
+  find "$libdir" -maxdepth 1 \( -name "libkrun*.${DYLIB_EXT}*" -o -name "libkrunfw*.${DYLIB_EXT}*" \) \
     -exec cp -P {} "${STAGE}/lib/" \;
 done
 
