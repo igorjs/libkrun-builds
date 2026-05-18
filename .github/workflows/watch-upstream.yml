@@ -1,0 +1,106 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Watch containers/libkrun + containers/libkrunfw for new stable releases and,
+# when either is ahead of the versions pinned here, bump version.txt /
+# libkrunfw-version.txt on main and dispatch the build workflow to publish
+# fresh bottles.
+#
+# Fully automatic, no human gate. Consequences to be aware of:
+#   - A libkrun bump publishes a new `libkrun-v<new>` release (new tag).
+#   - A libkrunfw-only bump rebuilds and OVERWRITES the existing
+#     `libkrun-v<libkrun>` release with new bottles (same tag, new bytes).
+#   - Either way the bottle checksums change, so downstream consumers that
+#     pin checksums (e.g. ward's vendor/libkrun-checksums.txt) must re-pin
+#     before their own releases will accept the new bottle.
+
+name: watch upstream
+
+on:
+  schedule:
+    - cron: "17 6 * * *" # daily, ~06:17 UTC
+  workflow_dispatch: # allow on-demand checks
+
+permissions:
+  contents: write # commit version bumps to main
+  actions: write # dispatch the build workflow
+
+concurrency:
+  group: watch-upstream
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check upstream releases and bump pins
+        id: bump
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # Latest non-prerelease tag for a repo, leading 'v' stripped.
+          latest() {
+            gh api "repos/$1/releases/latest" --jq '.tag_name' | sed 's/^v//'
+          }
+
+          # True when $1 is a strictly newer version than $2 (semver via sort -V).
+          newer() {
+            [[ "$1" != "$2" ]] && \
+              [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" == "$1" ]]
+          }
+
+          KRUN_PINNED="$(tr -d '[:space:]' < version.txt)"
+          KRUNFW_PINNED="$(tr -d '[:space:]' < libkrunfw-version.txt)"
+          KRUN_LATEST="$(latest containers/libkrun)"
+          KRUNFW_LATEST="$(latest containers/libkrunfw)"
+
+          echo "libkrun:   pinned=${KRUN_PINNED} latest=${KRUN_LATEST}"
+          echo "libkrunfw: pinned=${KRUNFW_PINNED} latest=${KRUNFW_LATEST}"
+
+          changed=false
+          if newer "${KRUN_LATEST}" "${KRUN_PINNED}"; then
+            printf '%s\n' "${KRUN_LATEST}" > version.txt
+            changed=true
+            echo "==> bump libkrun ${KRUN_PINNED} -> ${KRUN_LATEST}"
+          fi
+          if newer "${KRUNFW_LATEST}" "${KRUNFW_PINNED}"; then
+            printf '%s\n' "${KRUNFW_LATEST}" > libkrunfw-version.txt
+            changed=true
+            echo "==> bump libkrunfw ${KRUNFW_PINNED} -> ${KRUNFW_LATEST}"
+          fi
+
+          # Build when a version changed, or when no release exists yet for the
+          # current libkrun pin (auto-retry a previously failed build).
+          KRUN_NOW="$(tr -d '[:space:]' < version.txt)"
+          release_missing=false
+          gh release view "libkrun-v${KRUN_NOW}" > /dev/null 2>&1 || release_missing=true
+
+          build_needed=false
+          if [[ "${changed}" == true || "${release_missing}" == true ]]; then
+            build_needed=true
+          else
+            echo "==> Up to date with a published release; nothing to do."
+          fi
+
+          {
+            echo "changed=${changed}"
+            echo "build_needed=${build_needed}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Commit version bumps
+        if: steps.bump.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add version.txt libkrunfw-version.txt
+          git commit -m "chore: bump pinned libkrun/libkrunfw to latest upstream"
+          git push
+
+      - name: Dispatch build workflow
+        if: steps.bump.outputs.build_needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build.yml --ref main
