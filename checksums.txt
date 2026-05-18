@@ -3,10 +3,9 @@
 # Populated by humans after a successful run of
 # .github/workflows/build.yml, the workflow uploads each tarball to a
 # GitHub Release and prints the SHA-256 of each artefact in its Job
-# Summary. Copy those values here and commit. The ward release
-# packaging consumer reads this file (or its own pinned copy) and
-# refuses to use any downloaded tarball whose hash doesn't match ,
-# this is the supply-chain integrity gate.
+# Summary. Copy those values here and commit. Consumers read this file
+# (or pin their own copy) and refuse to use any downloaded tarball whose
+# hash doesn't match, this is the supply-chain integrity gate.
 #
 # Format: <hex sha256>  libkrun-<version>-<target>.tar.gz
 
