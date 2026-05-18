@@ -272,9 +272,22 @@ if [[ "${TARGET}" == *darwin* ]]; then
 else
   # Linux: set RUNPATH = $ORIGIN so the loader looks next to the .so.
   for lib in libkrun libkrunfw; do
-    target_file="${STAGE}/lib/${lib}.${DYLIB_EXT}"
-    if [[ -L "$target_file" ]]; then
-      target_file="${STAGE}/lib/$(readlink "$target_file")"
+    # Resolve the full symlink chain to the real ELF. Upstream lays out
+    # e.g. libkrun.so -> libkrun.so.1 -> libkrun.so.1.18.0 (two levels),
+    # so a single-level `readlink` stops at an intermediate symlink and
+    # patchelf would rewrite that instead of the actual binary. `realpath`
+    # chases the whole chain (mirrors the install_name_tool step above).
+    sym="${STAGE}/lib/${lib}.${DYLIB_EXT}"
+    if [[ ! -e "$sym" ]]; then
+      echo "error: ${sym} not found after staging" >&2
+      ls -la "${STAGE}/lib/" >&2
+      exit 4
+    fi
+    target_file="$(realpath "$sym")"
+    if [[ ! -f "$target_file" ]]; then
+      echo "error: realpath of ${sym} -> ${target_file} is not a regular file" >&2
+      ls -la "${STAGE}/lib/" >&2
+      exit 4
     fi
     patchelf --set-rpath '$ORIGIN' "$target_file" || exit 4
   done
