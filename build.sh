@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 #
 # Build relocatable libkrun + libkrunfw artefacts for the host platform.
 #
