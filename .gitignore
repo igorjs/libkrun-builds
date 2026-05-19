@@ -1,3 +1,6 @@
 # Build scratch + output produced by build.sh
 /build/
 /dist/
+
+# Local-only editor / agent state (machine-specific)
+/.local/
