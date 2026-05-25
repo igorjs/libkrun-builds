@@ -1,0 +1,18 @@
+# Code ownership for review enforcement.
+# Pair with branch protection on main to require review on the files
+# that drive the release pipeline. The bot accounts that auto-bump
+# version.txt are exempt via `Allow specified actors to bypass required
+# pull requests` in the branch protection rule.
+
+# Anything in this repo defaults to the maintainer.
+*                               @igorjs
+
+# Security-sensitive: the workflow definitions, build script, version
+# pins, and upstream checksum manifest. Bot-generated PRs touching
+# these need explicit human approval unless bypass is configured.
+/.github/workflows/             @igorjs
+/.github/CODEOWNERS             @igorjs
+/build.sh                       @igorjs
+/version.txt                    @igorjs
+/libkrunfw-version.txt          @igorjs
+/upstream-checksums.txt         @igorjs

@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Pinned SHA-256 of every upstream tarball the build downloads.
+# build.sh verifies each download against the corresponding entry here
+# before extracting; mismatches fail the build with exit code 3.
+#
+# Updated automatically by .github/workflows/watch-upstream.yml when
+# bumping version.txt / libkrunfw-version.txt. To bump manually, fetch
+# the asset, compute its SHA-256, and replace the matching line.
+#
+# Format: <sha256>  <kind>/<version>/<asset>
+
+483f5579006d59212b9942b9ca39f03c6305940129d99925ecc979b1e6754711  libkrun/v1.18.1/source.tar.gz
+1019ba38b04b5f56b4db48baf48f632ad5611a2e3bf9f3a14a1671e2368b73f1  libkrunfw/v5.4.0/libkrunfw-prebuilt-aarch64.tgz
+32b7a33dc7dd6c966c59e898a7bceb9b52d5a22e8abc41fba0b587e238eaf22f  libkrunfw/v5.4.0/libkrunfw-x86_64.tgz
+c600af2b9bce8115ac30f02f38ae01207c6f041de84b58f4732ef62b5ebbc62e  libkrunfw/v5.4.0/libkrunfw-aarch64.tgz

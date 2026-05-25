@@ -3,7 +3,41 @@
 # Build relocatable libkrun + libkrunfw artefacts on a matrix of hosts and
 # publish them to a GitHub Release tagged `libkrun-v<version>`.
 #
-# Gating: manual trigger only.
+# Hardening posture
+# -----------------
+# - All third-party actions pinned to commit SHAs (immune to tag-swap).
+# - Top-level `permissions: {}` then promoted per-job, least privilege.
+# - StepSecurity harden-runner active on every job in audit mode. Flip
+#   to `egress-policy: block` after a few clean runs confirm the
+#   allow-list is complete.
+# - Build provenance attestations (SLSA L3 via Sigstore + GitHub OIDC)
+#   generated per artefact. Verify with:
+#     gh attestation verify <tarball> --repo igorjs/libkrun-builds
+# - Cosign keyless signing produces `.sig` + `.pem` sidecars per
+#   tarball. Verify with:
+#     cosign verify-blob --signature <tarball>.sig \
+#       --certificate <tarball>.pem \
+#       --certificate-identity-regexp \
+#         'https://github.com/igorjs/libkrun-builds/.+' \
+#       --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+#       <tarball>
+# - Upstream tarball SHAs verified inside build.sh against
+#   upstream-checksums.txt (file pinned in this repo, refreshed by the
+#   watcher).
+# - Rust toolchain pinned to a specific version so a future regression
+#   in `stable` can't poison a Saturday-morning release.
+# - Release job verifies all three matrix tarballs are present before
+#   touching checksums.txt; partial failures don't leave a half-truthful
+#   file in main.
+# - checksums.txt sync goes via PR with auto-merge instead of direct
+#   push, giving a diffable audit record on every release.
+# - All template expressions sourced from inputs / step outputs are
+#   passed through `env:` rather than interpolated into `run:` blocks
+#   directly, blocking the standard GitHub Actions injection vector.
+#   The version_override input is also format-validated before use.
+#
+# Triggers: manual via Actions tab, or a push to main that bumps a
+# version pin / upstream-checksums.txt (the watcher's normal path).
 
 name: release
 
@@ -14,24 +48,51 @@ on:
         description: "Override version (otherwise read from version.txt)"
         required: false
         type: string
+  push:
+    branches: [main]
+    paths:
+      - version.txt
+      - libkrunfw-version.txt
+      - upstream-checksums.txt
 
-permissions:
-  contents: write # required to create releases + upload artefacts
+permissions: {}
+
+concurrency:
+  # Serialise releases for the same libkrun version. Manual dispatch
+  # + watcher dispatch racing each other would otherwise both try to
+  # publish the same tag.
+  group: release-${{ github.workflow }}-${{ inputs.version_override || github.sha }}
+  cancel-in-progress: false
 
 jobs:
   # ── Resolve the versions once and propagate to the matrix jobs ─────
   resolve-version:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       libkrun_version: ${{ steps.read.outputs.libkrun_version }}
       libkrunfw_version: ${{ steps.read.outputs.libkrunfw_version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - id: read
         name: Resolve libkrun + libkrunfw versions
+        env:
+          INPUT_VERSION: ${{ inputs.version_override }}
         run: |
-          if [[ -n "${{ inputs.version_override }}" ]]; then
-            LIBKRUN_VERSION="${{ inputs.version_override }}"
+          # Validate the override strictly before letting it near any
+          # shell command. semver-ish: digits and dots, optional pre-
+          # release suffix. Anything else is treated as an attempted
+          # injection.
+          if [[ -n "${INPUT_VERSION}" ]]; then
+            if ! [[ "${INPUT_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]; then
+              echo "error: invalid version_override: '${INPUT_VERSION}'" >&2
+              exit 1
+            fi
+            LIBKRUN_VERSION="${INPUT_VERSION}"
           else
             LIBKRUN_VERSION="$(tr -d '[:space:]' < version.txt)"
           fi
@@ -43,6 +104,10 @@ jobs:
   # ── Build per-target ──────────────────────────────────────────────
   build:
     needs: [resolve-version]
+    permissions:
+      contents: read
+      id-token: write       # required by attest-build-provenance and cosign keyless
+      attestations: write   # required by attest-build-provenance
     strategy:
       fail-fast: false
       matrix:
@@ -80,13 +145,23 @@ jobs:
                 bc bison flex
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          # `audit` logs egress without blocking; flip to `block` once
+          # a clean release run confirms the allow-list is complete.
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install build dependencies
         run: ${{ matrix.install_deps }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master @ 2026-05
         with:
+          # Hard-pin the Rust version so a stable-channel regression
+          # can't quietly break a release. Bump deliberately when
+          # libkrun's MSRV advances or a needed fix lands upstream.
+          toolchain: "1.85.0"
           targets: ${{ matrix.target }}
 
       - name: Build libkrun (${{ matrix.target }})
@@ -98,9 +173,12 @@ jobs:
 
       - name: Record checksum
         id: checksum
+        env:
+          LIBKRUN_VERSION: ${{ needs.resolve-version.outputs.libkrun_version }}
+          MATRIX_TARGET: ${{ matrix.target }}
         run: |
           cd dist
-          TARBALL="libkrun-${{ needs.resolve-version.outputs.libkrun_version }}-${{ matrix.target }}.tar.gz"
+          TARBALL="libkrun-${LIBKRUN_VERSION}-${MATRIX_TARGET}.tar.gz"
           if command -v sha256sum > /dev/null 2>&1; then
             SHA="$(sha256sum "$TARBALL" | awk '{print $1}')"
           else
@@ -111,13 +189,34 @@ jobs:
           echo "${SHA}  ${TARBALL}" > "${TARBALL}.sha256"
           echo "Checksum for ${TARBALL}: ${SHA}"
 
+      - name: Generate build provenance attestation
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: dist/${{ steps.checksum.outputs.tarball }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign tarball with cosign (keyless OIDC)
+        env:
+          COSIGN_YES: "true"
+          TARBALL: ${{ steps.checksum.outputs.tarball }}
+        run: |
+          cd dist
+          cosign sign-blob \
+            --output-signature "${TARBALL}.sig" \
+            --output-certificate "${TARBALL}.pem" \
+            "${TARBALL}"
+
       - name: Upload artefact (per-target build output)
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: libkrun-${{ matrix.target }}
           path: |
             dist/libkrun-*-${{ matrix.target }}.tar.gz
             dist/libkrun-*-${{ matrix.target }}.tar.gz.sha256
+            dist/libkrun-*-${{ matrix.target }}.tar.gz.sig
+            dist/libkrun-*-${{ matrix.target }}.tar.gz.pem
           if-no-files-found: error
           retention-days: 14
 
@@ -125,29 +224,55 @@ jobs:
   release:
     needs: [resolve-version, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write       # required to create/update the release
     steps:
-      - uses: actions/checkout@v6
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Download all build artefacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: dist
           merge-multiple: true
 
-      - name: Summarise checksums
+      - name: Verify all three targets present
         run: |
-          echo "## Vendor build summary" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Version: \`${{ needs.resolve-version.outputs.libkrun_version }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Copy the following lines into \`checksums.txt\`:" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          cat dist/*.sha256 | sort | tee -a "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # Guard against a partial-matrix release sneaking through.
+          # `fail-fast: false` means one target failing doesn't stop
+          # the others; this check makes sure we never publish a
+          # release that's missing a triple.
+          shopt -s nullglob
+          tarballs=( dist/libkrun-*.tar.gz )
+          if (( ${#tarballs[@]} != 3 )); then
+            echo "error: expected 3 tarballs, found ${#tarballs[@]}" >&2
+            ls -la dist/ >&2
+            exit 1
+          fi
+          echo "Found tarballs:"
+          printf '  %s\n' "${tarballs[@]}"
+
+      - name: Summarise checksums
+        env:
+          LIBKRUN_VERSION: ${{ needs.resolve-version.outputs.libkrun_version }}
+        run: |
+          {
+            echo "## Vendor build summary"
+            echo ""
+            echo "Version: \`${LIBKRUN_VERSION}\`"
+            echo ""
+            echo "Copy the following lines into \`checksums.txt\`:"
+            echo ""
+            echo '```'
+            cat dist/*.sha256 | sort
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create or update GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
         with:
           tag_name: libkrun-v${{ needs.resolve-version.outputs.libkrun_version }}
           name: libkrun ${{ needs.resolve-version.outputs.libkrun_version }}
@@ -162,29 +287,91 @@ jobs:
             include/libkrun.h
             ```
 
-            **Checksums**: SHA-256 sums are available in the workflow Job Summary
-            and in `checksums.txt`.
+            ### Verifying this release
+
+            **SHA-256** (fastest, no extra tools):
+            ```
+            sha256sum -c <tarball>.sha256        # Linux
+            shasum -a 256 -c <tarball>.sha256    # macOS
+            ```
+
+            **Build provenance attestation** (proves this binary was built by
+            this workflow on this commit):
+            ```
+            gh attestation verify <tarball> --repo igorjs/libkrun-builds
+            ```
+
+            **Cosign keyless signature**:
+            ```
+            cosign verify-blob \
+              --signature <tarball>.sig \
+              --certificate <tarball>.pem \
+              --certificate-identity-regexp 'https://github.com/igorjs/libkrun-builds/.+' \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              <tarball>
+            ```
           files: |
             dist/libkrun-*.tar.gz
             dist/libkrun-*.tar.gz.sha256
+            dist/libkrun-*.tar.gz.sig
+            dist/libkrun-*.tar.gz.pem
           fail_on_unmatched_files: true
 
-      - name: Sync checksums.txt on main
-        env:
-          VERSION: ${{ needs.resolve-version.outputs.libkrun_version }}
+  # ── Sync checksums.txt via PR (diffable audit, optional auto-merge) ─
+  sync-checksums:
+    needs: [resolve-version, release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # create branch + commit
+      pull-requests: write  # open PR + (optionally) enable auto-merge
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Download all .sha256 sidecars
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Rebuild checksums.txt
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Preserve the comment/blank header, then append the sorted sums
-          # from the freshly built .sha256 sidecars. Keeps checksums.txt in
-          # lockstep with the published release so the watcher's automatic
-          # bumps never leave it stale.
-          { grep -E '^#|^$' checksums.txt; cat dist/*.sha256 | sort; } > checksums.txt.new
+          # Preserve the comment/blank header, then append the sorted
+          # sums from the freshly built .sha256 sidecars. Keeps
+          # checksums.txt in lockstep with the published release so
+          # the watcher's automatic bumps never leave it stale.
+          { grep -E '^#|^$' checksums.txt || true; cat dist/*.sha256 | sort; } > checksums.txt.new
           mv checksums.txt.new checksums.txt
-          git add checksums.txt
-          if git diff --cached --quiet; then
-            echo "checksums.txt already current"
-          else
-            git commit -m "chore: update checksums for libkrun-v${VERSION}"
-            git push origin HEAD:main
-          fi
+
+      - name: Open PR to sync checksums.txt
+        id: cpr
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          commit-message: "chore: update checksums for libkrun-v${{ needs.resolve-version.outputs.libkrun_version }}"
+          title: "chore: sync checksums for libkrun-v${{ needs.resolve-version.outputs.libkrun_version }}"
+          body: |
+            Auto-generated by `.github/workflows/release.yml` after publishing
+            `libkrun-v${{ needs.resolve-version.outputs.libkrun_version }}`.
+
+            This PR keeps `checksums.txt` in lockstep with the binaries
+            attached to the release. If auto-merge is enabled at the
+            repo level, this PR merges itself; otherwise it waits for
+            human review.
+          branch: bot/sync-checksums-v${{ needs.resolve-version.outputs.libkrun_version }}
+          base: main
+          delete-branch: true
+          add-paths: checksums.txt
+          labels: |
+            automated
+            checksums
+
+      - name: Enable auto-merge on the sync PR
+        if: steps.cpr.outputs.pull-request-number
+        continue-on-error: true
+        uses: peter-evans/enable-pull-request-automerge@a660677d5469627102a1c1e11409dd063606628d # v3.0.0
+        with:
+          pull-request-number: ${{ steps.cpr.outputs.pull-request-number }}
+          merge-method: squash

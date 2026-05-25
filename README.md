@@ -1,34 +1,16 @@
-# ward-vendor
+# libkrun-builds
 
-Pre-built **libkrun** + **libkrunfw** binaries.
+Pre-built `libkrun` and `libkrunfw` binaries for the platforms supported
+upstream. Each GitHub Release ships a relocatable tarball per target triple,
+with checksum, build provenance, and cosign sidecars, ready to extract and
+link against.
 
-This repo contains build scripts and CI workflows that produce relocatable
-libkrun/libkrunfw binaries (`.dylib` for macOS, `.so` for Linux) and publish
-them to GitHub Releases tagged `libkrun-v<version>`.
-
-## Layout
-
-```
-.
-├── README.md
-├── LICENSE
-├── version.txt            pinned libkrun release tag
-├── libkrunfw-version.txt  pinned libkrunfw release tag
-├── build.sh               builds libkrun + libkrunfw for the host platform
-├── checksums.txt          SHA-256 sums per target tarball
-└── .github/workflows/build.yml
-```
-
-## How to bump libkrun
-
-1. Edit `version.txt` to the new version (no `v` prefix, just the number).
-2. Commit + push.
-3. Trigger the **build** workflow from the Actions tab (`workflow_dispatch`).
-4. When the run completes, the workflow publishes a release tagged
-   `libkrun-v<new>` with one tarball per supported triple plus matching
-   `.sha256` sidecars.
-5. Copy the SHA-256 sums from the workflow's Job Summary into
-   `checksums.txt`, commit, push.
+`libkrun` is a dynamic library for spawning lightweight microVMs. It depends on
+`libkrunfw`, a companion library that embeds a Linux kernel image. Building
+both from source needs a Rust toolchain, `lld`, `libclang`, and a fully
+configured kernel build environment, with a handful of non-obvious quirks on
+macOS. This repo runs that build once per release in CI and publishes the
+results.
 
 ## Supported targets
 
@@ -38,32 +20,314 @@ them to GitHub Releases tagged `libkrun-v<version>`.
 
 ## Using a release
 
-Each `libkrun-v<version>` release carries one tarball per target triple plus a
-matching `.sha256` sidecar. To consume one:
+Releases are tagged `libkrun-v<version>` and carry, per target triple:
 
-1. Download the tarball for your triple and verify its checksum against the
-   sidecar, `sha256sum -c <tarball>.sha256` (Linux) or
-   `shasum -a 256 -c <tarball>.sha256` (macOS), or against `checksums.txt`.
-2. Extract it: `tar -xzf <tarball> -C <prefix>`. This yields:
-   ```
-   lib/libkrun.{dylib,so}      relocatable, @rpath / $ORIGIN install names
-   lib/libkrunfw.{dylib,so}    same
-   lib/pkgconfig/libkrun.pc    synthesised, placeholder prefix
-   include/libkrun.h
-   ```
-3. Rewrite the `__VENDOR_PREFIX__` placeholder in `lib/pkgconfig/libkrun.pc`
-   to your extraction prefix before using `pkg-config`.
-4. **Runtime:** libkrun loads libkrunfw by bare name (`libkrunfw.5.dylib` /
-   `libkrunfw.so.5`), so keep both libraries in the same directory and make
-   that directory discoverable by the dynamic loader, via the consuming
-   binary's rpath (`@loader_path` / `$ORIGIN`) or `DYLD_LIBRARY_PATH` /
-   `LD_LIBRARY_PATH`.
+- `libkrun-<version>-<triple>.tar.gz`         the binaries
+- `libkrun-<version>-<triple>.tar.gz.sha256`  SHA-256 sidecar
+- `libkrun-<version>-<triple>.tar.gz.sig`     cosign signature
+- `libkrun-<version>-<triple>.tar.gz.pem`     cosign certificate
+
+Plus a SLSA build provenance attestation stored on GitHub's attestation API
+(not downloaded as a file; verified via `gh attestation verify`).
+
+### 1. Download and verify
+
+Pick one of the three verification paths depending on your trust model.
+
+#### SHA-256 (fastest, no extra tools)
+
+```bash
+TRIPLE=aarch64-apple-darwin               # or x86_64-unknown-linux-gnu, etc.
+VERSION=1.18.1                            # match the release tag, no 'v' prefix
+TARBALL=libkrun-${VERSION}-${TRIPLE}.tar.gz
+BASE=https://github.com/igorjs/libkrun-builds/releases/download/libkrun-v${VERSION}
+
+curl --fail --location --remote-name "${BASE}/${TARBALL}"
+curl --fail --location --remote-name "${BASE}/${TARBALL}.sha256"
+
+# Linux
+sha256sum -c "${TARBALL}.sha256"
+# macOS
+shasum -a 256 -c "${TARBALL}.sha256"
+```
+
+`checksums.txt` at the root of this repo carries the same sums for every
+published release, useful when you want to pin a checksum out-of-band in
+your own consumer repo.
+
+#### Build provenance attestation (strongest end-to-end guarantee)
+
+Every release artifact has a SLSA build provenance statement signed via
+Sigstore using GitHub's OIDC. Verification proves the tarball was built by
+*this specific workflow* on *this specific commit*, not just that the bytes
+match a checksum someone published.
+
+```bash
+gh attestation verify "${TARBALL}" --repo igorjs/libkrun-builds
+```
+
+Requires `gh` 2.49+ and is free for public repos.
+
+#### Cosign keyless signature
+
+For consumers that already verify via Sigstore but don't run `gh`:
+
+```bash
+curl --fail --location --remote-name "${BASE}/${TARBALL}.sig"
+curl --fail --location --remote-name "${BASE}/${TARBALL}.pem"
+
+cosign verify-blob \
+  --signature "${TARBALL}.sig" \
+  --certificate "${TARBALL}.pem" \
+  --certificate-identity-regexp 'https://github.com/igorjs/libkrun-builds/.+' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "${TARBALL}"
+```
+
+### 2. Extract and rewrite the pkg-config prefix
+
+```bash
+PREFIX=/opt/libkrun                       # wherever you want it
+mkdir -p "${PREFIX}"
+tar -xzf "${TARBALL}" -C "${PREFIX}"
+
+# Rewrite the placeholder in libkrun.pc so pkg-config returns real paths.
+sed -i.bak "s|__VENDOR_PREFIX__|${PREFIX}|" "${PREFIX}/lib/pkgconfig/libkrun.pc"
+rm "${PREFIX}/lib/pkgconfig/libkrun.pc.bak"
+```
+
+After that, `PKG_CONFIG_PATH=${PREFIX}/lib/pkgconfig pkg-config --cflags --libs
+libkrun` returns the right flags.
+
+### 3. Runtime: make `libkrunfw` discoverable
+
+`libkrun` loads `libkrunfw` at runtime by bare name (`libkrunfw.5.dylib` on
+macOS, `libkrunfw.so.5` on Linux), not by absolute path. Both libraries ship
+together in the tarball's `lib/` directory with their install names set to
+`@rpath/libkrun{,fw}.dylib` (macOS) or RUNPATH `$ORIGIN` (Linux), so the
+loader looks next to whichever binary loaded them.
+
+You've got two ways to satisfy that lookup:
+
+- **Embed an rpath in your consuming binary.** Set `@loader_path` (macOS) or
+  `$ORIGIN` (Linux) so the loader looks beside your executable, then ship
+  `libkrun.{dylib,so}` and `libkrunfw.{dylib,so}` next to it. Portable, no
+  environment variables required.
+- **Set a loader env var at runtime.** `DYLD_LIBRARY_PATH=${PREFIX}/lib` on
+  macOS, `LD_LIBRARY_PATH=${PREFIX}/lib` on Linux. Simpler for development,
+  fragile in production (some macOS binaries strip `DYLD_*`).
+
+Whichever you pick, keep `libkrun` and `libkrunfw` in the same directory.
+
+## Tarball contents
+
+```
+lib/libkrun.{dylib,so}            relocatable, install name @rpath / $ORIGIN
+lib/libkrunfw.{dylib,so}          same
+lib/pkgconfig/libkrun.pc          synthesised, prefix is __VENDOR_PREFIX__
+include/libkrun.h                 the public header
+```
+
+`libkrunfw.h` isn't shipped. Consumers link only against `libkrun`; `libkrunfw`
+is dlopened at runtime.
+
+## Versioning
+
+`libkrun` and `libkrunfw` use independent upstream version schemes. The
+authoritative pairing comes from upstream's Homebrew formulas, and this repo
+pins both:
+
+- `version.txt` carries the `libkrun` release tag (e.g. `1.18.1`).
+- `libkrunfw-version.txt` carries the `libkrunfw` release tag (e.g. `5.4.0`).
+- `upstream-checksums.txt` pins the SHA-256 of every upstream tarball the
+  build downloads. The watcher refreshes it whenever it bumps a version.
+
+### Release tags
+
+Releases are tagged `libkrun-v<libkrun-version>` only. The `libkrunfw` version
+is embedded in the binaries but not in the tag.
+
+### The same-tag overwrite gotcha
+
+When upstream `libkrunfw` releases a new version but `libkrun` doesn't, the
+watcher bumps `libkrunfw-version.txt` and re-publishes under the existing
+`libkrun-v<n>` tag. The tag stays the same; the bytes change. Consumers
+pinning by tag silently get new binaries on the next download.
+
+If you need byte-stable pinning, pin by SHA-256 against `checksums.txt` or by
+attestation against a specific commit SHA.
+
+### Release cadence
+
+A daily cron (midnight AEST) checks `containers/libkrun` and
+`containers/libkrunfw` for new stable releases. When either is newer than the
+pinned version, the watcher:
+
+1. Bumps the relevant `*.txt` file on `main`.
+2. Refetches every upstream tarball and updates `upstream-checksums.txt` with
+   the new SHA-256 pins (so `build.sh` will refuse to use a tarball that
+   changed between watch-time and build-time).
+3. Pushes the bump commit and dispatches the release workflow.
+
+Manual dispatches via the Actions tab work the same way and accept a
+`version_override`.
+
+## Repo layout
+
+```
+.
+├── README.md
+├── LICENSE
+├── version.txt                       pinned libkrun release tag
+├── libkrunfw-version.txt             pinned libkrunfw release tag
+├── upstream-checksums.txt            pinned SHAs of upstream downloads
+├── build.sh                          builds for the host platform
+├── checksums.txt                     SHAs of the published vendor tarballs
+└── .github/
+    ├── CODEOWNERS                    review enforcement for sensitive paths
+    └── workflows/
+        ├── release.yml               build matrix + publish
+        └── watch-upstream.yml        daily upstream watcher
+```
+
+## Building locally
+
+You normally don't need to: the publishing workflow runs the build in CI and
+attaches the result to a Release. Local builds are mostly useful for
+debugging build-script changes before committing.
+
+### Required tools (host-dependent)
+
+| Host                                | Need                                                                                                                       |
+|-------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
+| macOS (Apple Silicon)               | Xcode CLT (`install_name_tool`), Homebrew, `lld` (`brew install lld`), pkg-config, `LIBCLANG_PATH` pointing at Homebrew llvm |
+| Linux (amd64 or arm64)              | `build-essential clang lld llvm-dev libclang-dev patchelf pkg-config libelf-dev bc bison flex`                              |
+| All                                 | Rust 1.85+ (CI pins exactly `1.85.0`), `curl`, `tar`, `pkg-config`, `sha256sum` or `shasum`                                  |
+
+### Run the build
+
+```bash
+./build.sh                         # builds for the host's native triple
+TARGET=x86_64-unknown-linux-gnu ./build.sh   # cross-target (limited; see below)
+```
+
+Output: `dist/libkrun-<version>-<triple>.tar.gz`. The script also prints the
+SHA-256 to stdout.
+
+Cross-targeting is constrained: the script doesn't set up a cross-compiler
+toolchain, it just toggles the script's output naming. Use it only for hosts
+that can natively produce the requested triple (e.g. a Linux x86_64 host can
+target `x86_64-unknown-linux-gnu` but not `aarch64-apple-darwin`).
+
+## Automated releases (operator notes)
+
+### Daily watcher
+
+`.github/workflows/watch-upstream.yml` runs at `0 14 * * *` UTC (midnight
+AEST), with `concurrency: { group: watch-upstream }` to serialise overlapping
+runs. It directly pushes its version-bump commit to `main` and dispatches the
+release workflow.
+
+If you want the watcher's bumps to go through PR review instead, replace its
+`git push` step with `peter-evans/create-pull-request` and add the bot to
+your branch protection's bypass list via `Allow specified actors to bypass
+required pull requests`. This keeps the daily cadence working while letting
+CODEOWNERS gate human-authored changes.
+
+### Manual dispatch
+
+Use the **release** workflow's `Run workflow` button from the Actions tab.
+The optional `version_override` input lets you publish from a non-default
+version pin; the workflow validates the format before using it.
+
+### Repo settings required
+
+For the full hardening to engage, these need flipping in the GitHub UI:
+
+- **Settings → General → Pull Requests → Allow auto-merge**. Required for the
+  checksums-sync PR to merge itself; without it, you'll see open PRs after
+  every release that need manual merge.
+- **Settings → Branches → Branch protection rule for `main`**. Recommended.
+  Require status checks + CODEOWNERS review on PRs. Add the `github-actions`
+  bot to the bypass list so the daily watcher still works.
+- **Settings → Actions → Workflow permissions → Allow GitHub Actions to
+  create and approve pull requests**. Required for
+  `peter-evans/create-pull-request` to function.
+
+## Hardening posture
+
+In addition to standard CI hygiene, the release pipeline:
+
+- Pins every third-party action to a commit SHA (immune to tag-swap).
+- Scopes `permissions: {}` at workflow level, promotes per job.
+- Runs StepSecurity `harden-runner` (audit mode) on every job.
+- Hard-pins the Rust toolchain to `1.85.0`.
+- Verifies upstream tarball SHAs in `build.sh` against `upstream-checksums.txt`.
+- Generates a SLSA build provenance attestation per artefact via
+  `actions/attest-build-provenance`.
+- Cosign keyless-signs each tarball using GitHub OIDC, producing `.sig` +
+  `.pem` sidecars.
+- Verifies all three matrix tarballs are present before touching
+  `checksums.txt`, so a partial-matrix failure can't desync the file.
+- Syncs `checksums.txt` via PR with auto-merge for diffable audit.
+- Validates `workflow_dispatch` inputs against a strict format before letting
+  them near any shell command.
+
+## Troubleshooting
+
+### `error: missing required tool 'patchelf'` on Linux
+
+Install via apt: `sudo apt-get install -y patchelf`.
+
+### `error: missing required tool 'install_name_tool'` on macOS
+
+You're missing Xcode Command Line Tools. Install with `xcode-select --install`.
+
+### `cargo: command not found`
+
+Install Rust via rustup: `curl --proto '=https' --tlsv1.2 -sSf
+https://sh.rustup.rs | sh`. Then `rustup install 1.85.0` to match CI.
+
+### `bindgen` complains about libclang on macOS
+
+Homebrew keeps `llvm` keg-only, so `libclang.dylib` isn't on dyld's default
+search path. Export it before running `build.sh`:
+
+```bash
+LLVM_PREFIX="$(brew --prefix llvm)"
+export LIBCLANG_PATH="${LLVM_PREFIX}/lib"
+export LLVM_CONFIG_PATH="${LLVM_PREFIX}/bin/llvm-config"
+```
+
+The CI workflow does this automatically.
+
+### `error: upstream SHA mismatch for '...'`
+
+`build.sh` refused to use a tarball whose SHA doesn't match
+`upstream-checksums.txt`. Either upstream re-uploaded the asset (rare but
+documented for the libkrun source tarball, which GitHub can regenerate), or
+something is tampering with the download. Inspect the diff between the
+expected and actual SHA, then either:
+
+- If you trust upstream changed the bytes legitimately: refresh the line in
+  `upstream-checksums.txt` manually (see the file's header comment).
+- Otherwise: don't bypass it. Investigate.
+
+### libkrun loads but can't find libkrunfw at runtime
+
+Three usual causes:
+
+1. You didn't keep `libkrun` and `libkrunfw` in the same directory.
+2. Your binary's rpath doesn't include `@loader_path` / `$ORIGIN`, and you
+   haven't set `DYLD_LIBRARY_PATH` / `LD_LIBRARY_PATH`.
+3. On macOS, your binary is hardened (SIP, library validation) and is
+   stripping `DYLD_*` env vars. Embed an rpath instead.
 
 ## Licence
 
-The build scripts in this repo are Apache-2.0 (matching upstream
-libkrun, since they're trivial glue around its build system). The
-produced binaries inherit libkrun's licence: Apache-2.0.
+The build scripts in this repo are Apache-2.0, matching upstream `libkrun`
+(since they're trivial glue around its build system). The produced binaries
+inherit `libkrun`'s licence: Apache-2.0.
 
-The `libkrun-v<version>` releases are tagged but not separately
-licensed beyond the licences of their constituent parts.
+The `libkrun-v<version>` releases are tagged but not separately licensed
+beyond the licences of their constituent parts.

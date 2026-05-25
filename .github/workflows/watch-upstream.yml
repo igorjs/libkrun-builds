@@ -2,16 +2,30 @@
 #
 # Watch containers/libkrun + containers/libkrunfw for new stable releases and,
 # when either is ahead of the versions pinned here, bump version.txt /
-# libkrunfw-version.txt on main and dispatch the release workflow to publish
-# fresh builds.
+# libkrunfw-version.txt + upstream-checksums.txt on main and dispatch the
+# release workflow to publish fresh builds.
 #
 # Fully automatic, no human gate. Consequences to be aware of:
 #   - A libkrun bump publishes a new `libkrun-v<new>` release (new tag).
 #   - A libkrunfw-only bump rebuilds and OVERWRITES the existing
 #     `libkrun-v<libkrun>` release with new builds (same tag, new bytes).
 #   - Either way the build checksums change, so downstream consumers that
-#     pin checksums (e.g. ward's vendor/libkrun-checksums.txt) must re-pin
-#     before their own releases will accept the new build.
+#     pin checksums must re-pin before their own releases will accept the
+#     new build.
+#
+# Hardening posture
+# -----------------
+# - All actions pinned to commit SHAs.
+# - Top-level `permissions: {}`, promoted per job.
+# - harden-runner in audit mode.
+# - When bumping a version pin, also computes and commits the SHA-256
+#   of every upstream tarball that build.sh will fetch, so an upstream
+#   tamper between watch-time and build-time fails loud instead of
+#   flowing through silently.
+# - Direct push to main is intentional for the bot bump (the cron's
+#   value is full automation; PR-with-review would defeat it). Pair
+#   with branch protection + CODEOWNERS bypass for the actions bot
+#   if you want review gating on human-authored changes only.
 
 name: watch upstream
 
@@ -20,9 +34,7 @@ on:
     - cron: "0 14 * * *" # daily, midnight AEST (Sydney)
   workflow_dispatch: # allow on-demand checks
 
-permissions:
-  contents: write # commit version bumps to main
-  actions: write # dispatch the release workflow
+permissions: {}
 
 concurrency:
   group: watch-upstream
@@ -31,8 +43,15 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # commit version bumps to main
+      actions: write  # dispatch the release workflow
     steps:
-      - uses: actions/checkout@v6
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Check upstream releases and bump pins
         id: bump
@@ -90,12 +109,57 @@ jobs:
             echo "build_needed=${build_needed}"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Commit version bumps
+      - name: Refresh upstream-checksums.txt
+        if: steps.bump.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+
+          # Fetch every upstream asset that build.sh will download and
+          # record its SHA-256. build.sh verifies against this file at
+          # build time, so a tampered upstream asset after the watcher
+          # has run won't poison the release silently: the build fails
+          # loudly with an SHA mismatch.
+
+          LIBKRUN_NEW="$(tr -d '[:space:]' < version.txt)"
+          LIBKRUNFW_NEW="$(tr -d '[:space:]' < libkrunfw-version.txt)"
+
+          tmp="$(mktemp -d)"
+          declare -a entries=()
+
+          echo "==> Fetching libkrun v${LIBKRUN_NEW} source tarball"
+          curl --fail --silent --show-error --location \
+            --output "${tmp}/source.tar.gz" \
+            "https://github.com/containers/libkrun/archive/refs/tags/v${LIBKRUN_NEW}.tar.gz"
+          sha="$(sha256sum "${tmp}/source.tar.gz" | awk '{print $1}')"
+          entries+=("${sha}  libkrun/v${LIBKRUN_NEW}/source.tar.gz")
+
+          for asset in libkrunfw-prebuilt-aarch64.tgz libkrunfw-x86_64.tgz libkrunfw-aarch64.tgz; do
+            echo "==> Fetching libkrunfw v${LIBKRUNFW_NEW} (${asset})"
+            curl --fail --silent --show-error --location \
+              --output "${tmp}/${asset}" \
+              "https://github.com/containers/libkrunfw/releases/download/v${LIBKRUNFW_NEW}/${asset}"
+            sha="$(sha256sum "${tmp}/${asset}" | awk '{print $1}')"
+            entries+=("${sha}  libkrunfw/v${LIBKRUNFW_NEW}/${asset}")
+          done
+
+          # Preserve the comment/blank header, replace the body.
+          {
+            grep -E '^#|^$' upstream-checksums.txt || true
+            printf '%s\n' "${entries[@]}"
+          } > upstream-checksums.txt.new
+          mv upstream-checksums.txt.new upstream-checksums.txt
+
+          echo "==> New upstream-checksums.txt:"
+          cat upstream-checksums.txt
+
+          rm -rf "${tmp}"
+
+      - name: Commit version bumps + refreshed upstream checksums
         if: steps.bump.outputs.changed == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add version.txt libkrunfw-version.txt
+          git add version.txt libkrunfw-version.txt upstream-checksums.txt
           git commit -m "chore: bump pinned libkrun/libkrunfw to latest upstream"
           git push
 

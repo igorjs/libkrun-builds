@@ -113,6 +113,51 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Upstream SHA verification helper.
+#
+# Reads upstream-checksums.txt at the repo root and verifies that a freshly
+# downloaded file matches the pinned SHA-256. The manifest format is
+# `<sha256>  <key>`, mirroring `sha256sum -c` output. Keys are URL-path-style
+# triples like `libkrun/v1.18.1/source.tar.gz` so the same manifest can hold
+# multiple versions side-by-side.
+#
+# Why this exists: GitHub release downloads aren't signed end-to-end. An
+# upstream maintainer-account takeover or release-asset tamper would
+# otherwise silently flow into the published vendor binaries. The watcher
+# refreshes these pins whenever it bumps version.txt, so the verification
+# window between cron-time fetch and build-time fetch is minutes, not days.
+# ---------------------------------------------------------------------------
+
+CHECKSUMS_FILE="${SCRIPT_DIR}/upstream-checksums.txt"
+
+verify_sha() {
+  local file="$1" key="$2" expected actual
+  if [[ ! -f "${CHECKSUMS_FILE}" ]]; then
+    echo "error: upstream-checksums.txt not found at ${CHECKSUMS_FILE}" >&2
+    exit 3
+  fi
+  expected="$(awk -v k="${key}" '$2 == k {print $1; exit}' "${CHECKSUMS_FILE}")"
+  if [[ -z "${expected}" ]]; then
+    echo "error: no pinned SHA for '${key}' in upstream-checksums.txt" >&2
+    echo "       bump the manifest before changing version.txt by hand." >&2
+    exit 3
+  fi
+  if command -v sha256sum > /dev/null 2>&1; then
+    actual="$(sha256sum "${file}" | awk '{print $1}')"
+  else
+    actual="$(shasum -a 256 "${file}" | awk '{print $1}')"
+  fi
+  if [[ "${expected}" != "${actual}" ]]; then
+    echo "error: upstream SHA mismatch for '${key}'" >&2
+    echo "  expected: ${expected}" >&2
+    echo "  actual:   ${actual}" >&2
+    echo "  file:     ${file}" >&2
+    exit 3
+  fi
+  echo "==> Verified upstream SHA for ${key}"
+}
+
+# ---------------------------------------------------------------------------
 # Scratch directories
 # ---------------------------------------------------------------------------
 
@@ -134,6 +179,8 @@ curl --fail --silent --show-error --location \
   --output "${WORK}/${LIBKRUNFW_ASSET}" \
   "${LIBKRUNFW_URL}" \
   || { echo "error: failed to download libkrunfw from ${LIBKRUNFW_URL}" >&2; exit 3; }
+
+verify_sha "${WORK}/${LIBKRUNFW_ASSET}" "libkrunfw/v${LIBKRUNFW_VERSION}/${LIBKRUNFW_ASSET}"
 
 mkdir -p "${WORK}/libkrunfw"
 tar -xzf "${WORK}/${LIBKRUNFW_ASSET}" -C "${WORK}/libkrunfw" --strip-components=1 \
@@ -180,6 +227,9 @@ curl --fail --silent --show-error --location \
   --output "${WORK}/libkrun.tar.gz" \
   "https://github.com/containers/libkrun/archive/refs/tags/v${LIBKRUN_VERSION}.tar.gz" \
   || { echo "error: failed to download libkrun source tarball" >&2; exit 3; }
+
+verify_sha "${WORK}/libkrun.tar.gz" "libkrun/v${LIBKRUN_VERSION}/source.tar.gz"
+
 mkdir -p "${WORK}/libkrun"
 tar -xzf "${WORK}/libkrun.tar.gz" -C "${WORK}/libkrun" --strip-components=1 \
   || { echo "error: failed to extract libkrun source" >&2; exit 3; }
