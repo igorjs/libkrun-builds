@@ -3,15 +3,15 @@
 # Watch containers/libkrun + containers/libkrunfw for new stable releases and,
 # when either is ahead of the versions pinned here, bump version.txt /
 # libkrunfw-version.txt on main and dispatch the release workflow to publish
-# fresh bottles.
+# fresh builds.
 #
 # Fully automatic, no human gate. Consequences to be aware of:
 #   - A libkrun bump publishes a new `libkrun-v<new>` release (new tag).
 #   - A libkrunfw-only bump rebuilds and OVERWRITES the existing
-#     `libkrun-v<libkrun>` release with new bottles (same tag, new bytes).
-#   - Either way the bottle checksums change, so downstream consumers that
+#     `libkrun-v<libkrun>` release with new builds (same tag, new bytes).
+#   - Either way the build checksums change, so downstream consumers that
 #     pin checksums (e.g. ward's vendor/libkrun-checksums.txt) must re-pin
-#     before their own releases will accept the new bottle.
+#     before their own releases will accept the new build.
 
 name: watch upstream
 
