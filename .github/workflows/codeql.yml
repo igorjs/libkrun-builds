@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# CodeQL analysis scoped to the `actions` language only. This repo is
+# bash + YAML + Markdown; CodeQL has no useful analyser for bash, but
+# its `actions` analyser is genuinely good at catching workflow
+# vulnerabilities (script injection via untrusted inputs, missing
+# permission blocks, unscoped tokens, unpinned actions, etc.).
+#
+# After this workflow runs cleanly on `main` for the first time,
+# promote it to a required status check in the main-branch ruleset
+# and re-enable "Require code scanning results" in the same ruleset.
+
+name: codeql
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/**
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/**
+  schedule:
+    # Weekly Sunday 03:00 UTC, so a CodeQL release with a new query
+    # pack surfaces within seven days even when no PR has retriggered
+    # the scan.
+    - cron: "0 3 * * 0"
+
+permissions: {}
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyse GitHub Actions workflows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # required to upload SARIF results
+      actions: read            # required by codeql-action for matrix metadata
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Initialise CodeQL (actions analyser only)
+        uses: github/codeql-action/init@03e4368ac7daa2bd82b3e85262f3bf87ee112f57 # v3.36.0
+        with:
+          languages: actions
+          # `security-extended` adds workflow-injection rules and other
+          # higher-coverage queries on top of the default pack.
+          queries: security-extended
+
+      - name: Perform analysis
+        uses: github/codeql-action/analyze@03e4368ac7daa2bd82b3e85262f3bf87ee112f57 # v3.36.0
+        with:
+          category: "actions"

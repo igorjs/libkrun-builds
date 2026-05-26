@@ -185,9 +185,12 @@ Manual dispatches via the Actions tab work the same way and accept a
 ├── checksums.txt                     SHAs of the published vendor tarballs
 └── .github/
     ├── CODEOWNERS                    review enforcement for sensitive paths
+    ├── dependabot.yml                weekly bumps for SHA-pinned actions
     └── workflows/
         ├── release.yml               build matrix + publish
-        └── watch-upstream.yml        daily upstream watcher
+        ├── watch-upstream.yml        daily upstream watcher
+        ├── lint.yml                  actionlint on every workflow change
+        └── codeql.yml                CodeQL `actions` analyser
 ```
 
 ## Building locally
@@ -225,14 +228,17 @@ target `x86_64-unknown-linux-gnu` but not `aarch64-apple-darwin`).
 
 `.github/workflows/watch-upstream.yml` runs at `0 14 * * *` UTC (midnight
 AEST), with `concurrency: { group: watch-upstream }` to serialise overlapping
-runs. It directly pushes its version-bump commit to `main` and dispatches the
-release workflow.
+runs. When upstream has a new release, it opens a PR via
+`peter-evans/create-pull-request` (commits are API-created, so they're
+auto-signed by GitHub), enables auto-merge, and dispatches the release
+workflow against the PR branch so the build proceeds in parallel with the
+PR's review / status checks.
 
-If you want the watcher's bumps to go through PR review instead, replace its
-`git push` step with `peter-evans/create-pull-request` and add the bot to
-your branch protection's bypass list via `Allow specified actors to bypass
-required pull requests`. This keeps the daily cadence working while letting
-CODEOWNERS gate human-authored changes.
+If the PR can't auto-merge (no bypass for the bot + required reviews), the
+release still publishes from the PR branch, the PR sits open until you
+approve, and main syncs to the published version on the next merge. To make
+the loop fully automatic, add the `github-actions` app to the bypass list of
+your main-branch ruleset.
 
 ### Manual dispatch
 
@@ -259,17 +265,26 @@ For the full hardening to engage, these need flipping in the GitHub UI:
 In addition to standard CI hygiene, the release pipeline:
 
 - Pins every third-party action to a commit SHA (immune to tag-swap).
+- Runs Dependabot weekly to refresh those SHAs, so pinning doesn't decay
+  into "frozen stale dependencies".
 - Scopes `permissions: {}` at workflow level, promotes per job.
 - Runs StepSecurity `harden-runner` (audit mode) on every job.
+- Lints every workflow change with `actionlint` via `.github/workflows/lint.yml`.
+- Analyses every workflow change with CodeQL's `actions` analyser (queries:
+  `security-extended`) via `.github/workflows/codeql.yml`.
 - Hard-pins the Rust toolchain to `1.85.0`.
 - Verifies upstream tarball SHAs in `build.sh` against `upstream-checksums.txt`.
 - Generates a SLSA build provenance attestation per artefact via
-  `actions/attest-build-provenance`.
+  `actions/attest-build-provenance`, then re-verifies it in the same job
+  before publishing.
 - Cosign keyless-signs each tarball using GitHub OIDC, producing `.sig` +
-  `.pem` sidecars.
+  `.pem` sidecars, then re-verifies the signature before publishing.
 - Verifies all three matrix tarballs are present before touching
   `checksums.txt`, so a partial-matrix failure can't desync the file.
-- Syncs `checksums.txt` via PR with auto-merge for diffable audit.
+- Lands every bot-authored change via PR with auto-merge: version bumps and
+  checksums sync both go through `peter-evans/create-pull-request`, which
+  uses API-created (auto-signed) commits compatible with a `Require signed
+  commits` ruleset.
 - Validates `workflow_dispatch` inputs against a strict format before letting
   them near any shell command.
 

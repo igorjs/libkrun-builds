@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Static analysis for the workflow files themselves. Runs actionlint on
+# every PR that touches .github/workflows/** and on every push to main.
+# Catches the kind of issues the security_reminder_hook flagged manually
+# during development (untrusted input interpolation, missing pins,
+# unreachable jobs, etc.).
+#
+# Promote this to a required status check in the main-branch ruleset
+# once it's been observed running cleanly at least once.
+
+name: lint
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/**
+      - .github/dependabot.yml
+      - .github/CODEOWNERS
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/**
+      - .github/dependabot.yml
+      - .github/CODEOWNERS
+
+permissions: {}
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+        run: |
+          # Download the pinned actionlint binary directly rather than
+          # piping its installer to bash. Pinning by version + verifying
+          # the downloaded tarball SHA gives a real integrity check that
+          # `curl | bash` doesn't.
+          curl --fail --silent --show-error --location \
+            -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          tar -xzf actionlint.tar.gz actionlint
+          chmod +x actionlint
+
+      - name: Run actionlint
+        run: ./actionlint -color

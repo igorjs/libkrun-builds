@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Pair with the SHA-pinned actions in .github/workflows/*.yml. Dependabot
+# tracks each pinned SHA, opens a PR when a new release is published
+# upstream, and writes the new SHA into the workflow file with the new
+# version tag in a trailing comment. Without this config, SHA pinning
+# slowly converts from "supply chain hardening" into "frozen stale
+# dependencies".
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "02:00"
+      timezone: "Australia/Sydney"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    groups:
+      # Roll the GitHub-published actions together; they tend to ship in
+      # lockstep and one PR per repo is plenty of noise.
+      actions-core:
+        patterns:
+          - "actions/*"

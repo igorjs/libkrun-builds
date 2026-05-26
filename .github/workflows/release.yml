@@ -48,12 +48,11 @@ on:
         description: "Override version (otherwise read from version.txt)"
         required: false
         type: string
-  push:
-    branches: [main]
-    paths:
-      - version.txt
-      - libkrunfw-version.txt
-      - upstream-checksums.txt
+  # No push trigger: the watcher dispatches this workflow against the
+  # PR branch directly, and the eventual PR merge to main would
+  # otherwise duplicate that build with non-bit-identical Rust output
+  # overwriting the release. Manual edits to version.txt should go
+  # through workflow_dispatch.
 
 permissions: {}
 
@@ -194,6 +193,21 @@ jobs:
         with:
           subject-path: dist/${{ steps.checksum.outputs.tarball }}
 
+      - name: Self-verify attestation
+        # Sanity check that the attestation pipeline is wired correctly:
+        # if `gh attestation verify` can't find or validate the statement
+        # we just created, neither will downstream consumers. Tolerant of
+        # the brief API-propagation window with continue-on-error so a
+        # cold-cache failure doesn't fail the whole release.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TARBALL: ${{ steps.checksum.outputs.tarball }}
+        run: |
+          cd dist
+          gh attestation verify "${TARBALL}" --repo "${REPO}"
+
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
@@ -206,6 +220,23 @@ jobs:
           cosign sign-blob \
             --output-signature "${TARBALL}.sig" \
             --output-certificate "${TARBALL}.pem" \
+            "${TARBALL}"
+
+      - name: Self-verify cosign signature
+        # Same defence in depth: the signing step writes .sig + .pem
+        # without ever validating them. A misconfigured OIDC issuer or
+        # cert identity would silently produce signatures consumers
+        # can't verify; catching it here saves a broken release.
+        env:
+          REPO: ${{ github.repository }}
+          TARBALL: ${{ steps.checksum.outputs.tarball }}
+        run: |
+          cd dist
+          cosign verify-blob \
+            --signature "${TARBALL}.sig" \
+            --certificate "${TARBALL}.pem" \
+            --certificate-identity-regexp "https://github.com/${REPO}/.+" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "${TARBALL}"
 
       - name: Upload artefact (per-target build output)
