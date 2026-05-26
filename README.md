@@ -205,7 +205,7 @@ debugging build-script changes before committing.
 |-------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
 | macOS (Apple Silicon)               | Xcode CLT (`install_name_tool`), Homebrew, `lld` (`brew install lld`), pkg-config, `LIBCLANG_PATH` pointing at Homebrew llvm |
 | Linux (amd64 or arm64)              | `build-essential clang lld llvm-dev libclang-dev patchelf pkg-config libelf-dev bc bison flex`                              |
-| All                                 | Rust 1.85+ (CI pins exactly `1.85.0`), `curl`, `tar`, `pkg-config`, `sha256sum` or `shasum`                                  |
+| All                                 | Rust stable (CI uses `dtolnay/rust-toolchain@stable`; libkrun's deps need at least 1.87 today), `curl`, `tar`, `pkg-config`, `sha256sum` or `shasum` |
 
 ### Run the build
 
@@ -297,7 +297,10 @@ In addition to standard CI hygiene, the release pipeline:
 - Lints every workflow change with `actionlint` via `.github/workflows/lint.yml`.
 - Analyses every workflow change with CodeQL's `actions` analyser (queries:
   `security-extended`) via `.github/workflows/codeql.yml`.
-- Hard-pins the Rust toolchain to `1.85.0`.
+- Pins the `dtolnay/rust-toolchain` action by SHA but uses `stable` for the
+  toolchain itself; libkrun's transitive deps follow the Rust release train,
+  so a hard-pin too old fails faster than a Rust regression would break the
+  build.
 - Verifies upstream tarball SHAs in `build.sh` against `upstream-checksums.txt`.
 - Generates a SLSA build provenance attestation per artefact via
   `actions/attest-build-provenance`, then re-verifies it in the same job
@@ -326,7 +329,7 @@ You're missing Xcode Command Line Tools. Install with `xcode-select --install`.
 ### `cargo: command not found`
 
 Install Rust via rustup: `curl --proto '=https' --tlsv1.2 -sSf
-https://sh.rustup.rs | sh`. Then `rustup install 1.85.0` to match CI.
+https://sh.rustup.rs | sh`. Then `rustup default stable` to match CI.
 
 ### `bindgen` complains about libclang on macOS
 

@@ -157,10 +157,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master @ 2026-05
         with:
-          # Hard-pin the Rust version so a stable-channel regression
-          # can't quietly break a release. Bump deliberately when
-          # libkrun's MSRV advances or a needed fix lands upstream.
-          toolchain: "1.85.0"
+          # Use `stable` rather than a hard-pin: libkrun's transitive
+          # deps move with the Rust release train, and a hard-pin too
+          # old fails with E0658 on newly-stabilised features (e.g.
+          # `unsigned_is_multiple_of` in 1.87) faster than a Rust
+          # regression would break the build. The action SHA is still
+          # pinned, so we're protected against tag-swap on the
+          # toolchain installer itself; we just accept whatever
+          # rustup considers stable at run time.
+          toolchain: stable
           targets: ${{ matrix.target }}
 
       - name: Build libkrun (${{ matrix.target }})
