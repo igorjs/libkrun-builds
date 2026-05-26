@@ -266,10 +266,24 @@ For the full hardening to engage, these need flipping in the GitHub UI:
 - **Settings → Secrets and variables → Actions**. Two repo secrets required:
   - `BOT_APP_ID`: the numeric App ID of the App acting as the watcher.
   - `BOT_APP_PRIVATE_KEY`: the `.pem` contents of the App's private key.
+- **Settings → Code security → Dependabot security updates**. Toggle on.
+  This is the security-fix equivalent of the version-update PRs configured
+  in `.github/dependabot.yml`; it watches the GitHub Advisory Database for
+  CVEs in any dependency and opens a PR with the minimum fix, separate from
+  the weekly version-update cadence.
 
 The App needs `Contents: Read and write`, `Pull requests: Read and write`,
 `Actions: Read and write`, `Workflows: Read and write` at the App level, and
 must be installed on this repo with those scopes.
+
+### Account hardening (not repo-scoped, but the load-bearing piece)
+
+Every protection in this repo ultimately depends on `igorjs` being in the
+right hands. The single highest-leverage hardening step beyond what's
+configured here is hardware-key 2FA on the GitHub account:
+**Settings → Password and authentication → Two-factor authentication →
+Add → Security key**. A YubiKey or equivalent is ~$50 and replaces the
+SMS / TOTP code with a physical-presence check that phishing can't bypass.
 
 ## Hardening posture
 

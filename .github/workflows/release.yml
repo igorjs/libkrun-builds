@@ -196,17 +196,27 @@ jobs:
       - name: Self-verify attestation
         # Sanity check that the attestation pipeline is wired correctly:
         # if `gh attestation verify` can't find or validate the statement
-        # we just created, neither will downstream consumers. Tolerant of
-        # the brief API-propagation window with continue-on-error so a
-        # cold-cache failure doesn't fail the whole release.
-        continue-on-error: true
+        # we just created, neither will downstream consumers. Retries to
+        # absorb the brief API-propagation window after
+        # attest-build-provenance returns; if the attestation still
+        # isn't visible after ~1 minute, the pipeline is broken and the
+        # release fails loud rather than publishing unverifiable bytes.
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           TARBALL: ${{ steps.checksum.outputs.tarball }}
         run: |
           cd dist
-          gh attestation verify "${TARBALL}" --repo "${REPO}"
+          for attempt in 1 2 3 4 5 6; do
+            if gh attestation verify "${TARBALL}" --repo "${REPO}"; then
+              echo "Attestation verified on attempt ${attempt}"
+              exit 0
+            fi
+            echo "Attestation not yet visible (attempt ${attempt}/6), retrying in 10s..."
+            sleep 10
+          done
+          echo "error: attestation verification failed after 6 attempts" >&2
+          exit 1
 
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
