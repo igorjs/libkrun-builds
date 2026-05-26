@@ -228,17 +228,19 @@ target `x86_64-unknown-linux-gnu` but not `aarch64-apple-darwin`).
 
 `.github/workflows/watch-upstream.yml` runs at `0 14 * * *` UTC (midnight
 AEST), with `concurrency: { group: watch-upstream }` to serialise overlapping
-runs. When upstream has a new release, it opens a PR via
-`peter-evans/create-pull-request` (commits are API-created, so they're
-auto-signed by GitHub), enables auto-merge, and dispatches the release
-workflow against the PR branch so the build proceeds in parallel with the
-PR's review / status checks.
+runs. When upstream has a new release, it:
 
-If the PR can't auto-merge (no bypass for the bot + required reviews), the
-release still publishes from the PR branch, the PR sits open until you
-approve, and main syncs to the published version on the next merge. To make
-the loop fully automatic, add the `github-actions` app to the bypass list of
-your main-branch ruleset.
+1. Mints a short-lived installation token via `actions/create-github-app-token`
+   using the `BOT_APP_ID` + `BOT_APP_PRIVATE_KEY` repo secrets.
+2. Opens a PR via `peter-evans/create-pull-request` using the App's token
+   (commits are API-created, so they're auto-signed by GitHub).
+3. Enables auto-merge on the PR.
+4. Dispatches the release workflow against the PR branch so the build
+   proceeds in parallel with the PR's review / status checks.
+
+The App's identity (visible in the PR as the author) is bypass-able in
+rulesets as a first-class actor. Add the App to the main-branch ruleset's
+bypass list so its PRs auto-merge without manual review.
 
 ### Manual dispatch
 
@@ -251,14 +253,23 @@ version pin; the workflow validates the format before using it.
 For the full hardening to engage, these need flipping in the GitHub UI:
 
 - **Settings → General → Pull Requests → Allow auto-merge**. Required for the
-  checksums-sync PR to merge itself; without it, you'll see open PRs after
-  every release that need manual merge.
-- **Settings → Branches → Branch protection rule for `main`**. Recommended.
-  Require status checks + CODEOWNERS review on PRs. Add the `github-actions`
-  bot to the bypass list so the daily watcher still works.
-- **Settings → Actions → Workflow permissions → Allow GitHub Actions to
-  create and approve pull requests**. Required for
-  `peter-evans/create-pull-request` to function.
+  bot PRs (version bumps + checksums sync) to merge themselves; without it,
+  open PRs accumulate and need manual merge.
+- **Settings → Rules → Rulesets**. Recommended.
+  - One ruleset for `main` with: `Restrict deletions`, `Block force pushes`,
+    `Require a pull request before merging` (CODEOWNERS review optional). Add
+    the App identity (`igorjs-bot` or whatever you named it) to the bypass
+    list so its PRs auto-merge.
+  - One ruleset for `libkrun-v*` tags with: `Restrict deletions`, `Block
+    force pushes`. Stops leaked tokens from retagging a release to point at
+    different bytes.
+- **Settings → Secrets and variables → Actions**. Two repo secrets required:
+  - `BOT_APP_ID`: the numeric App ID of the App acting as the watcher.
+  - `BOT_APP_PRIVATE_KEY`: the `.pem` contents of the App's private key.
+
+The App needs `Contents: Read and write`, `Pull requests: Read and write`,
+`Actions: Read and write`, `Workflows: Read and write` at the App level, and
+must be installed on this repo with those scopes.
 
 ## Hardening posture
 

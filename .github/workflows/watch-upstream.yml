@@ -31,8 +31,15 @@
 # - The release workflow is dispatched against the PR branch directly,
 #   so builds don't block on PR merge. The PR auto-merges once any
 #   required reviews / status checks clear, syncing main with the
-#   already-published release. For uninterrupted automation, add the
-#   `github-actions` bot to the ruleset's bypass list.
+#   already-published release.
+# - The watcher acts under a dedicated GitHub App identity (configured
+#   via the BOT_APP_ID + BOT_APP_PRIVATE_KEY repo secrets). The App is
+#   added to the main-branch ruleset's bypass list so its PRs
+#   auto-merge without manual review. Compared to GITHUB_TOKEN, this
+#   gives the watcher a stable bypass-able identity, exact-scope
+#   permissions (only what the App declares), and no expiry. The
+#   workflow's own GITHUB_TOKEN is reduced to `contents: read` for
+#   checkout because the App token does all the writes.
 
 name: watch upstream
 
@@ -50,10 +57,10 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # GITHUB_TOKEN scope is minimal: the App token (minted below) does
+    # all the writes. contents: read is required only for checkout.
     permissions:
-      contents: write       # peter-evans/create-pull-request needs this
-      pull-requests: write  # open PR + enable auto-merge
-      actions: write        # dispatch the release workflow
+      contents: read
     steps:
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
@@ -61,10 +68,17 @@ jobs:
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
+      - name: Mint App installation token
+        id: app_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+
       - name: Check upstream releases and bump pins
         id: bump
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
         run: |
           set -euo pipefail
 
@@ -168,6 +182,7 @@ jobs:
         if: steps.bump.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
+          token: ${{ steps.app_token.outputs.token }}
           commit-message: "chore: bump pinned libkrun/libkrunfw to latest upstream"
           title: "chore: bump pinned libkrun/libkrunfw to latest upstream"
           body: |
@@ -197,13 +212,14 @@ jobs:
         continue-on-error: true
         uses: peter-evans/enable-pull-request-automerge@a660677d5469627102a1c1e11409dd063606628d # v3.0.0
         with:
+          token: ${{ steps.app_token.outputs.token }}
           pull-request-number: ${{ steps.cpr.outputs.pull-request-number }}
           merge-method: squash
 
       - name: Dispatch release workflow against the PR branch
         if: steps.bump.outputs.build_needed == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
           # When the bump created a PR, build from the PR branch so the
           # release picks up the new version.txt / upstream-checksums.txt
           # without waiting for the PR to merge. When the bump was

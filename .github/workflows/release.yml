@@ -352,15 +352,22 @@ jobs:
   sync-checksums:
     needs: [resolve-version, release]
     runs-on: ubuntu-latest
+    # GITHUB_TOKEN scope is minimal: the App token does the writes.
     permissions:
-      contents: write       # create branch + commit
-      pull-requests: write  # open PR + (optionally) enable auto-merge
+      contents: read
     steps:
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Mint App installation token
+        id: app_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
 
       - name: Download all .sha256 sidecars
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -381,6 +388,7 @@ jobs:
         id: cpr
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
+          token: ${{ steps.app_token.outputs.token }}
           commit-message: "chore: update checksums for libkrun-v${{ needs.resolve-version.outputs.libkrun_version }}"
           title: "chore: sync checksums for libkrun-v${{ needs.resolve-version.outputs.libkrun_version }}"
           body: |
@@ -404,5 +412,6 @@ jobs:
         continue-on-error: true
         uses: peter-evans/enable-pull-request-automerge@a660677d5469627102a1c1e11409dd063606628d # v3.0.0
         with:
+          token: ${{ steps.app_token.outputs.token }}
           pull-request-number: ${{ steps.cpr.outputs.pull-request-number }}
           merge-method: squash
