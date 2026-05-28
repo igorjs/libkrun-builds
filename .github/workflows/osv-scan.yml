@@ -1,0 +1,76 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# OSV-Scanner against libkrun's transitive Cargo dependencies.
+# Downloads the pinned upstream source (per version.txt), verifies the
+# SHA against upstream-checksums.txt, then scans the Cargo.lock.
+
+name: osv-scan
+
+on:
+  pull_request:
+    paths:
+      - version.txt
+      - upstream-checksums.txt
+      - build.sh
+      - .github/workflows/osv-scan.yml
+  push:
+    branches: [main]
+    paths:
+      - version.txt
+      - upstream-checksums.txt
+      - build.sh
+      - .github/workflows/osv-scan.yml
+  schedule:
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: osv-scan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Download and verify libkrun source
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '[:space:]' < version.txt)"
+          KEY="libkrun/v${VERSION}/source.tar.gz"
+          echo "Scanning libkrun v${VERSION}"
+
+          curl --fail --silent --show-error --location \
+            -o libkrun.tar.gz \
+            "https://github.com/containers/libkrun/archive/refs/tags/v${VERSION}.tar.gz"
+
+          EXPECTED="$(awk -v k="${KEY}" '$2 == k {print $1; exit}' upstream-checksums.txt)"
+          ACTUAL="$(sha256sum libkrun.tar.gz | awk '{print $1}')"
+          if [[ -z "${EXPECTED}" ]]; then
+            echo "error: no pinned SHA for ${KEY} in upstream-checksums.txt" >&2
+            exit 1
+          fi
+          if [[ "${EXPECTED}" != "${ACTUAL}" ]]; then
+            echo "error: libkrun source SHA mismatch (expected ${EXPECTED}, got ${ACTUAL})" >&2
+            exit 1
+          fi
+
+          mkdir -p libkrun-src
+          tar -xzf libkrun.tar.gz -C libkrun-src --strip-components=1
+
+      - uses: google/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        with:
+          scan-args: |-
+            --recursive
+            --skip-git
+            ./libkrun-src
