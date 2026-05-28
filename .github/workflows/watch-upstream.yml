@@ -33,7 +33,7 @@
 #   required reviews / status checks clear, syncing main with the
 #   already-published release.
 # - The watcher acts under a dedicated GitHub App identity (configured
-#   via the BOT_APP_ID + BOT_APP_PRIVATE_KEY repo secrets). The App is
+#   via the BOT_APP_CLIENT_ID + BOT_APP_PRIVATE_KEY repo secrets). The App is
 #   added to the main-branch ruleset's bypass list so its PRs
 #   auto-merge without manual review. Compared to GITHUB_TOKEN, this
 #   gives the watcher a stable bypass-able identity, exact-scope
