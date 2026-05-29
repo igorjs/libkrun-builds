@@ -232,7 +232,14 @@ jobs:
           TARBALL: ${{ steps.checksum.outputs.tarball }}
         run: |
           cd dist
+          # cosign v3 (installed by cosign-installer v4.x) flipped
+          # --new-bundle-format to true by default. In bundle mode the
+          # --output-signature / --output-certificate flags are accepted
+          # but silently ignored, leaving the split .sig + .pem files
+          # unwritten. Pin to the legacy output for now; the bundle-format
+          # migration is a follow-up.
           cosign sign-blob \
+            --new-bundle-format=false \
             --output-signature "${TARBALL}.sig" \
             --output-certificate "${TARBALL}.pem" \
             "${TARBALL}"
