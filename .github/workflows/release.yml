@@ -13,10 +13,10 @@
 # - Build provenance attestations (SLSA L3 via Sigstore + GitHub OIDC)
 #   generated per artefact. Verify with:
 #     gh attestation verify <tarball> --repo igorjs-forks/libkrun-builds
-# - Cosign keyless signing produces `.sig` + `.pem` sidecars per
-#   tarball. Verify with:
-#     cosign verify-blob --signature <tarball>.sig \
-#       --certificate <tarball>.pem \
+# - Cosign keyless signing produces a `.cosign-bundle.json` sidecar
+#   per tarball (bundle format, required by cosign v3+). Verify with:
+#     cosign verify-blob --bundle <tarball>.cosign-bundle.json \
+#       --new-bundle-format \
 #       --certificate-identity-regexp \
 #         'https://github.com/igorjs-forks/libkrun-builds/.+' \
 #       --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -232,21 +232,19 @@ jobs:
           TARBALL: ${{ steps.checksum.outputs.tarball }}
         run: |
           cd dist
-          # cosign v3 (installed by cosign-installer v4.x) flipped
-          # --new-bundle-format to true by default. In bundle mode the
-          # --output-signature / --output-certificate flags are accepted
-          # but silently ignored, leaving the split .sig + .pem files
-          # unwritten. Pin to the legacy output for now; the bundle-format
-          # migration is a follow-up.
+          # cosign v3 (installed by cosign-installer v4.x) removed the
+          # legacy split-file output path at the SDK layer. Even with
+          # --new-bundle-format=false the signer refuses to write
+          # separate .sig + .pem files. Produce a single bundle file
+          # per tarball; consumers verify with --bundle <bundle>
+          # --new-bundle-format.
           cosign sign-blob \
-            --new-bundle-format=false \
-            --output-signature "${TARBALL}.sig" \
-            --output-certificate "${TARBALL}.pem" \
+            --bundle "${TARBALL}.cosign-bundle.json" \
             "${TARBALL}"
 
       - name: Self-verify cosign signature
-        # Same defence in depth: the signing step writes .sig + .pem
-        # without ever validating them. A misconfigured OIDC issuer or
+        # Same defence in depth: the signing step writes the bundle
+        # without ever validating it. A misconfigured OIDC issuer or
         # cert identity would silently produce signatures consumers
         # can't verify; catching it here saves a broken release.
         env:
@@ -255,8 +253,8 @@ jobs:
         run: |
           cd dist
           cosign verify-blob \
-            --signature "${TARBALL}.sig" \
-            --certificate "${TARBALL}.pem" \
+            --bundle "${TARBALL}.cosign-bundle.json" \
+            --new-bundle-format \
             --certificate-identity-regexp "https://github.com/${REPO}/.+" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "${TARBALL}"
@@ -280,8 +278,7 @@ jobs:
           path: |
             dist/libkrun-*-${{ matrix.target }}.tar.gz
             dist/libkrun-*-${{ matrix.target }}.tar.gz.sha256
-            dist/libkrun-*-${{ matrix.target }}.tar.gz.sig
-            dist/libkrun-*-${{ matrix.target }}.tar.gz.pem
+            dist/libkrun-*-${{ matrix.target }}.tar.gz.cosign-bundle.json
             dist/libkrun-*-${{ matrix.target }}.tar.gz.sbom.cdx.json
           if-no-files-found: error
           retention-days: 14
@@ -370,8 +367,8 @@ jobs:
             **Cosign keyless signature**:
             ```
             cosign verify-blob \
-              --signature <tarball>.sig \
-              --certificate <tarball>.pem \
+              --bundle <tarball>.cosign-bundle.json \
+              --new-bundle-format \
               --certificate-identity-regexp 'https://github.com/${{ github.repository }}/.+' \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
               <tarball>
@@ -379,8 +376,7 @@ jobs:
           files: |
             dist/libkrun-*.tar.gz
             dist/libkrun-*.tar.gz.sha256
-            dist/libkrun-*.tar.gz.sig
-            dist/libkrun-*.tar.gz.pem
+            dist/libkrun-*.tar.gz.cosign-bundle.json
             dist/libkrun-*.tar.gz.sbom.cdx.json
           fail_on_unmatched_files: true
 

@@ -22,10 +22,10 @@ results.
 
 Releases are tagged `libkrun-v<version>` and carry, per target triple:
 
-- `libkrun-<version>-<triple>.tar.gz`         the binaries
-- `libkrun-<version>-<triple>.tar.gz.sha256`  SHA-256 sidecar
-- `libkrun-<version>-<triple>.tar.gz.sig`     cosign signature
-- `libkrun-<version>-<triple>.tar.gz.pem`     cosign certificate
+- `libkrun-<version>-<triple>.tar.gz`                   the binaries
+- `libkrun-<version>-<triple>.tar.gz.sha256`            SHA-256 sidecar
+- `libkrun-<version>-<triple>.tar.gz.cosign-bundle.json` cosign signing bundle
+- `libkrun-<version>-<triple>.tar.gz.sbom.cdx.json`     CycloneDX SBOM
 
 Plus a SLSA build provenance attestation stored on GitHub's attestation API
 (not downloaded as a file; verified via `gh attestation verify`).
@@ -73,12 +73,11 @@ Requires `gh` 2.49+ and is free for public repos.
 For consumers that already verify via Sigstore but don't run `gh`:
 
 ```bash
-curl --fail --location --remote-name "${BASE}/${TARBALL}.sig"
-curl --fail --location --remote-name "${BASE}/${TARBALL}.pem"
+curl --fail --location --remote-name "${BASE}/${TARBALL}.cosign-bundle.json"
 
 cosign verify-blob \
-  --signature "${TARBALL}.sig" \
-  --certificate "${TARBALL}.pem" \
+  --bundle "${TARBALL}.cosign-bundle.json" \
+  --new-bundle-format \
   --certificate-identity-regexp 'https://github.com/igorjs-forks/libkrun-builds/.+' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   "${TARBALL}"
